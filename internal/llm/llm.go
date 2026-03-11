@@ -1,23 +1,37 @@
 package llm
 
 import (
-	"net/http"
-	"os"
+	"context"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 )
 
+
 type LLM struct {
-	apiKey string
+	client openai.Client
 }
 
-type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-func NewLLM() *LLM {
+func NewLLM(apiKey string) *LLM {
+	client := openai.NewClient(
+		option.WithAPIKey(apiKey),
+		option.WithBaseURL("https://openrouter.ai/api/v1"),
+	)
 	return &LLM{
-		apiKey: os.Getenv("OPEN_ROUTER_KEY"),
+		client: client,
 	}
 }
 
-func (l *LLM) Chat(messages []ChatMessage) (string, error) {
+func (l *LLM) Invoke(Messages *[]openai.ChatCompletionMessageParamUnion) (string, error) {
+	params := openai.ChatCompletionNewParams{
+		Messages: *Messages,
+		Model: "openai/gpt-oss-120b:free",
+	}
+	response, err := l.client.Chat.Completions.New(
+		context.Background(),
+		params,
+	)
+	if err != nil {
+		return "", err
+	}
+	return response.Choices[0].Message.Content, nil
+}
