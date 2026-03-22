@@ -1,126 +1,91 @@
 package llm
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 
 	"pipeline/internal/tool"
 )
 
-const baseURL = "https://openrouter.ai/api/v1/chat/completions"
-
-// Message is a single conversation turn.
-type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"`
-}
-
-// ToolCall is a tool invocation requested by the LLM.
-type ToolCall struct {
-	ID       string       `json:"id"`
-	Type     string       `json:"type"`
-	Function FunctionCall `json:"function"`
-}
-
-// FunctionCall holds the tool name and JSON-encoded arguments.
-type FunctionCall struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
-
-// Client wraps the OpenRouter HTTP API.
+// Client wraps the official openai-go/v3 SDK pointed at OpenRouter.
 type Client struct {
-	apiKey string
-	http   *http.Client
+	inner openai.Client
 }
 
-// New creates a new LLM client.
+// New creates a Client using the official SDK with OpenRouter as the base URL.
 func New(apiKey string) *Client {
-	return &Client{
-		apiKey: apiKey,
-		http:   &http.Client{},
-	}
+	inner := openai.NewClient(
+		option.WithAPIKey(apiKey),
+		option.WithBaseURL("https://router.huggingface.co/v1"),
+	)
+	return &Client{inner: inner}
 }
 
-// Chat sends messages and returns a plain text response.
-func (c *Client) Chat(ctx context.Context, model string, messages []Message) (string, error) {
-	text, _, err := c.ChatWithTools(ctx, model, messages, nil)
-	return text, err
+// Chat sends a plain conversation (no tools) and returns the text response.
+func (c *Client) Chat(
+	ctx context.Context,
+	model string,
+	messages []openai.ChatCompletionMessageParamUnion,
+) (string, error) {
+	resp, err := c.inner.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model:     openai.ChatModel(model),
+		Messages:  messages,
+		MaxTokens: openai.Int(2048),
+	})
+	if err != nil {
+		return "", fmt.Errorf("LLM chat: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("LLM returned no choices")
+	}
+	return resp.Choices[0].Message.Content, nil
 }
 
 // ChatWithTools sends messages with optional tool schemas.
-// Returns (textResponse, toolCalls, error).
-// If the model wants to call tools, textResponse is empty and toolCalls is populated.
-// If the model produces a final answer, textResponse is populated and toolCalls is empty.
+// Returns (textResponse, completion, error).
+// The full completion is returned so the caller can use .ToParam() on the message.
+// If the model produced tool calls, textResponse is empty.
+// If the model produced a final answer, ToolCalls in the completion will be empty.
 func (c *Client) ChatWithTools(
 	ctx context.Context,
 	model string,
-	messages []Message,
+	messages []openai.ChatCompletionMessageParamUnion,
 	schemas []tool.Schema,
-) (string, []ToolCall, error) {
+) (*openai.ChatCompletion, error) {
 
-	reqBody := map[string]any{
-		"model":      model,
-		"messages":   messages,
-		"max_tokens": 2048,
+	params := openai.ChatCompletionNewParams{
+		Model:     openai.ChatModel(model),
+		Messages:  messages,
+		MaxTokens: openai.Int(2048),
 	}
+
+	// Build SDK tool params from our internal schema type.
+	// Use ChatCompletionToolParam directly — the canonical v3 type.
 	if len(schemas) > 0 {
-		reqBody["tools"] = schemas
-		reqBody["tool_choice"] = "auto"
+		tools := make([]openai.ChatCompletionToolUnionParam, len(schemas))
+		for i, s := range schemas {
+			tools[i] = openai.ChatCompletionToolUnionParam{
+				OfFunction: &openai.ChatCompletionFunctionToolParam{
+					Function: openai.FunctionDefinitionParam{
+						Name:        s.Function.Name,
+						Description: openai.String(s.Function.Description),
+						Parameters:  openai.FunctionParameters(s.Function.Parameters),
+					},
+				},
+			}
+		}
+		params.Tools = tools
 	}
 
-	bodyBytes, err := json.Marshal(reqBody)
+	resp, err := c.inner.Chat.Completions.New(ctx, params)
 	if err != nil {
-		return "", nil, fmt.Errorf("marshal request: %w", err)
+		return nil, fmt.Errorf("LLM chat: %w", err)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", nil, fmt.Errorf("create request: %w", err)
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("LLM returned no choices")
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", nil, fmt.Errorf("http request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	rawBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("API error %d: %s", resp.StatusCode, rawBody)
-	}
-
-	var result struct {
-		Choices []struct {
-			Message struct {
-				Content   string     `json:"content"`
-				ToolCalls []ToolCall `json:"tool_calls"`
-			} `json:"message"`
-		} `json:"choices"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-
-	if err := json.Unmarshal(rawBody, &result); err != nil {
-		return "", nil, fmt.Errorf("parse response: %w", err)
-	}
-	if result.Error != nil {
-		return "", nil, fmt.Errorf("LLM error: %s", result.Error.Message)
-	}
-	if len(result.Choices) == 0 {
-		return "", nil, fmt.Errorf("empty response from API")
-	}
-
-	msg := result.Choices[0].Message
-	return msg.Content, msg.ToolCalls, nil
+	return resp, nil
 }
