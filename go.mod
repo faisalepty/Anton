@@ -1,8 +1,8 @@
-module agent
+module pipeline
 
 go 1.24.3
 
-require github.com/openai/openai-go/v3 v3.26.0
+require github.com/openai/openai-go/v3 v3.29.0
 
 require (
 	github.com/tidwall/gjson v1.18.0 // indirect
