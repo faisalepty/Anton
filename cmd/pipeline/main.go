@@ -16,15 +16,14 @@ import (
 )
 
 func main() {
-	model     := flag.String("model", "openai/gpt-oss-120b:free", "OpenRouter model ID")
+	model := flag.String("model", "openai/gpt-oss-120b:free", "OpenRouter model ID")
 	agentsDir := flag.String("agents", "agent-definitions", "Path to agent definitions folder")
 	skillsDir := flag.String("skills", "skills", "Path to skills folder")
-	maxDepth  := flag.Int("depth", 2, "Max sub-agent delegation depth")
+	maxDepth := flag.Int("depth", 2, "Max sub-agent delegation depth")
 	flag.Parse()
 
-
 	// Require OpenRouter key
-	apiKey := "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"
+	apiKey := ""
 	if apiKey == "" {
 		fmt.Fprintln(os.Stderr, "error: OPENROUTER_API_KEY not set")
 		os.Exit(1)
@@ -55,8 +54,8 @@ func main() {
 	}
 
 	client := llm.New(apiKey)
-	mem    := memory.New()
-	p      := planner.New(client, reg, *model, *maxDepth)
+	mem := memory.New()
+	p := planner.New(client, reg, *model, *maxDepth)
 
 	// Startup banner
 	fmt.Println()
