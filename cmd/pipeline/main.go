@@ -12,23 +12,39 @@ import (
 	"pipeline/internal/memory"
 	"pipeline/internal/planner"
 	"pipeline/internal/registry"
+	"pipeline/internal/skill"
 )
 
 func main() {
-	model     := flag.String("model", "openai/gpt-oss-120b", "OpenRouter model ID")
+	model     := flag.String("model", "openai/gpt-oss-120b:free", "OpenRouter model ID")
 	agentsDir := flag.String("agents", "agent-definitions", "Path to agent definitions folder")
+	skillsDir := flag.String("skills", "skills", "Path to skills folder")
 	maxDepth  := flag.Int("depth", 2, "Max sub-agent delegation depth")
 	flag.Parse()
 
-	// Require API key
-	apiKey := "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"
+
+	// Require OpenRouter key
+	apiKey := "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"
 	if apiKey == "" {
-		fmt.Fprintln(os.Stderr, "error: OPENROUTER_API_KEY environment variable not set")
+		fmt.Fprintln(os.Stderr, "error: OPENROUTER_API_KEY not set")
 		os.Exit(1)
 	}
 
-	// Load all agent definitions from the agent-definitions folder
-	reg, err := registry.Load(*agentsDir)
+	// // Warn about optional keys
+	// if os.Getenv("TAVILY_API_KEY") == "" {
+	// 	fmt.Fprintln(os.Stderr, "warning: TAVILY_API_KEY not set — researcher agent will not work")
+	// 	fmt.Fprintln(os.Stderr, "         get a free key at https://app.tavily.com")
+	// }
+
+	// Load skills registry
+	skillReg, err := skill.Load(*skillsDir, skill.Providers)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading skills: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Load agent registry (agents declare which skills they use)
+	reg, err := registry.Load(*agentsDir, skillReg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading agents: %v\n", err)
 		os.Exit(1)
@@ -42,16 +58,16 @@ func main() {
 	mem    := memory.New()
 	p      := planner.New(client, reg, *model, *maxDepth)
 
-	// Print startup banner
+	// Startup banner
 	fmt.Println()
 	fmt.Println("Pipeline Agent")
 	fmt.Printf("model     : %s\n", *model)
-	fmt.Printf("agents dir: %s\n", *agentsDir)
-	fmt.Printf("max depth : %d\n", *maxDepth)
-	fmt.Printf("loaded    : %s\n", strings.Join(reg.Names(), ", "))
+	fmt.Printf("agents    : %s  (%s)\n", *agentsDir, strings.Join(reg.Names(), ", "))
+	fmt.Printf("skills    : %s\n", *skillsDir)
+	fmt.Printf("max-depth : %d\n", *maxDepth)
 	fmt.Println()
-	fmt.Println("Commands: /agents  /model <name>  /clear  /exit")
-	fmt.Println(strings.Repeat("─", 50))
+	fmt.Println("Commands: /agents  /skills  /model <n>  /clear  /exit")
+	fmt.Println(strings.Repeat("─", 55))
 	fmt.Println()
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -61,7 +77,6 @@ func main() {
 		if !scanner.Scan() {
 			break
 		}
-
 		input := strings.TrimSpace(scanner.Text())
 		if input == "" {
 			continue
@@ -75,8 +90,7 @@ func main() {
 
 		case input == "/clear":
 			mem.Clear()
-			fmt.Println("Memory cleared.")
-			fmt.Println()
+			fmt.Println("Memory cleared.\n")
 
 		case input == "/agents":
 			fmt.Println()
@@ -86,20 +100,41 @@ func main() {
 				if tools == "" {
 					tools = "none (pure LLM)"
 				}
+				skillList := strings.Join(def.SkillNames, ", ")
+				if skillList == "" {
+					skillList = "none"
+				}
 				fmt.Printf("  [%s]\n", name)
-				fmt.Printf("    role : %s\n", def.Role)
-				fmt.Printf("    tools: %s\n", tools)
+				fmt.Printf("    role  : %s\n", def.Role)
+				fmt.Printf("    skills: %s\n", skillList)
+				fmt.Printf("    tools : %s\n", tools)
 				fmt.Println()
 			}
 
+		case input == "/skills":
+			fmt.Println()
+			fmt.Println("Loaded skills and their tools:")
+			// Print from each agent's declared skills
+			seen := make(map[string]bool)
+			for _, name := range reg.Names() {
+				def, _ := reg.Get(name)
+				for _, sn := range def.SkillNames {
+					if !seen[sn] {
+						seen[sn] = true
+						fmt.Printf("  [%s]\n", sn)
+					}
+				}
+			}
+			fmt.Println()
+
 		case strings.HasPrefix(input, "/model "):
-			newModel := strings.TrimSpace(strings.TrimPrefix(input, "/model "))
-			if newModel == "" {
+			m := strings.TrimSpace(strings.TrimPrefix(input, "/model "))
+			if m == "" {
 				fmt.Println("Usage: /model <model-id>")
 				continue
 			}
-			p.SetModel(newModel)
-			fmt.Printf("Model switched to: %s\n\n", newModel)
+			p.SetModel(m)
+			fmt.Printf("Model -> %s\n\n", m)
 
 		default:
 			fmt.Println()
@@ -109,7 +144,7 @@ func main() {
 				continue
 			}
 			fmt.Printf("\nAnswer:\n%s\n\n", result)
-			fmt.Println(strings.Repeat("─", 50))
+			fmt.Println(strings.Repeat("─", 55))
 			fmt.Println()
 		}
 	}
