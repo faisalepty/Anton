@@ -32,7 +32,6 @@ func (c *Client) ChatWithTools(
 	messages []openai.ChatCompletionMessageParamUnion,
 	schemas []tool.Schema,
 ) (*openai.ChatCompletion, error) {
-
 	params := openai.ChatCompletionNewParams{
 		Model:     openai.ChatModel(model),
 		Messages:  messages,

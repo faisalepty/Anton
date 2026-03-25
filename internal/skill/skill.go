@@ -7,8 +7,6 @@ import (
 	"regexp"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"pipeline/internal/tool"
 )
 
@@ -19,11 +17,6 @@ type Skill struct {
 	Body    string // SKILL.md body — injected into agent system prompt
 	tools   map[string]tool.Tool
 	schemas []tool.Schema
-}
-
-
-type SkillFM struct {
-	Name string `yaml:"name"`
 }
 
 // Dispatch calls a tool by name with the given args.
@@ -118,29 +111,23 @@ func (r *Registry) Get(name string) (*Skill, bool) {
 	return s, ok
 }
 
-
-
+// parseSkillMD extracts the name from frontmatter and the body from SKILL.md.
 func parseSkillMD(content, folderName string) (name, body string) {
-	re := regexp.MustCompile(`(?s)^---\s*\n(.*?)\n---\s*\n?(.*)`)
+	re := regexp.MustCompile(`(?s)^---\n(.*?)\n---\n?(.*)`)
 	matches := re.FindStringSubmatch(content)
-
-	// No frontmatter → fallback
 	if matches == nil {
 		return folderName, strings.TrimSpace(content)
 	}
-
-	fmRaw := matches[1]
+	fm := matches[1]
 	body = strings.TrimSpace(matches[2])
 
-	var fm SkillFM
-	if err := yaml.Unmarshal([]byte(fmRaw), &fm); err != nil {
-		// fallback if YAML is broken
-		return folderName, body
+	// Extract name field
+	nameRe := regexp.MustCompile(`(?m)^name:\s*(.+)`)
+	if m := nameRe.FindStringSubmatch(fm); len(m) > 1 {
+		name = strings.TrimSpace(strings.Trim(m[1], `"`))
 	}
-
-	if fm.Name != "" {
-		return fm.Name, body
+	if name == "" {
+		name = folderName
 	}
-
-	return folderName, body
+	return name, body
 }
