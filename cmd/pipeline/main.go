@@ -16,24 +16,24 @@ import (
 )
 
 func main() {
-	model := flag.String("model", "openai/gpt-oss-120b:free", "OpenRouter model ID")
+	model := flag.String("model", "anthropic/claude-3.5-sonnet", "OpenRouter model ID")
 	agentsDir := flag.String("agents", "agent-definitions", "Path to agent definitions folder")
 	skillsDir := flag.String("skills", "skills", "Path to skills folder")
 	maxDepth := flag.Int("depth", 2, "Max sub-agent delegation depth")
 	flag.Parse()
 
 	// Require OpenRouter key
-	apiKey := ""
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	if apiKey == "" {
 		fmt.Fprintln(os.Stderr, "error: OPENROUTER_API_KEY not set")
 		os.Exit(1)
 	}
 
-	// // Warn about optional keys
-	// if os.Getenv("TAVILY_API_KEY") == "" {
-	// 	fmt.Fprintln(os.Stderr, "warning: TAVILY_API_KEY not set — researcher agent will not work")
-	// 	fmt.Fprintln(os.Stderr, "         get a free key at https://app.tavily.com")
-	// }
+	// Warn about optional keys
+	if os.Getenv("TAVILY_API_KEY") == "" {
+		fmt.Fprintln(os.Stderr, "warning: TAVILY_API_KEY not set — researcher agent will not work")
+		fmt.Fprintln(os.Stderr, "         get a free key at https://app.tavily.com")
+	}
 
 	// Load skills registry
 	skillReg, err := skill.Load(*skillsDir, skill.Providers)
