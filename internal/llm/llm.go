@@ -19,7 +19,7 @@ func New(apiKey string) *Client {
 	return &Client{
 		inner: openai.NewClient(
 			option.WithAPIKey(apiKey),
-			option.WithBaseURL("https://openrouter.ai/api/v1"),
+			option.WithBaseURL("https://openrouter.ai/api/v1"), // https://router.huggingface.co/v1, https://openrouter.ai/api/v1
 		),
 	}
 }
@@ -55,6 +55,7 @@ func (c *Client) ChatWithTools(
 	}
 
 	resp, err := c.inner.Chat.Completions.New(ctx, params)
+	fmt.Print(resp)
 	if err != nil {
 		return nil, fmt.Errorf("LLM: %w", err)
 	}
