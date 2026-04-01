@@ -1,0 +1,11 @@
+{
+  "name": "list_files",
+  "description": "Lists files in a given directory.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string", "description": "The directory path" }
+    },
+    "required": ["path"]
+  }
+}

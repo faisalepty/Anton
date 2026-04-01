@@ -9,8 +9,7 @@ role: >
   Backend specialist. Build reliable, secure server-side code.
   Write tests alongside implementation. Verify by compiling and running tests.
 skills:
-  - filesystem
-  - shell
+  - filesystem - shell
 ---
 
 ## Backend approach

@@ -1,242 +1,158 @@
 package registry
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
-
-	"pipeline/internal/skill"
-	"pipeline/internal/tool"
 )
 
-// AgentDef is a fully loaded agent definition.
-// Tools and system prompt instructions come from the declared skills.
+type ToolDef struct {
+	Name, SchemaPath, ScriptPath string
+}
+
+type SkillDef struct {
+	Name, Instructions string
+	Tools              map[string]ToolDef
+}
+
 type AgentDef struct {
-	Name        string
-	Description string
-	Role        string
-	Body        string   // AGENT.md instructions body
-	SkillNames  []string // declared in frontmatter: skills: filesystem, shell
-
-	// Assembled from skills at load time
-	tools       map[string]tool.Tool
-	schemas     []tool.Schema
-	skillBodies []string // SKILL.md bodies to inject into system prompt
+	Name, Role, Instructions string
+	SkillNames               []string
+	ResolvedSkills           []*SkillDef
+	AllowedSubAgents         []string
 }
 
-// Dispatch calls the named tool from any of this agent's skills.
-func (a *AgentDef) Dispatch(name string, args map[string]any) (string, error) {
-	t, ok := a.tools[name]
-	if !ok {
-		return "", fmt.Errorf("agent '%s' has no tool '%s'", a.Name, name)
+func (a *AgentDef) HasSkill(name string) bool {
+	for _, s := range a.SkillNames {
+		if s == name {
+			return true
+		}
 	}
-	return t.Run(args)
+	return false
 }
 
-// Schemas returns all tool schemas for LLM function calling.
-func (a *AgentDef) Schemas() []tool.Schema { return a.schemas }
+// Load initializes the system by crawling the agents and skills directories.
+func Load(agentsDir, skillsDir string) (map[string]*AgentDef, map[string]*SkillDef, error) {
+	skills := make(map[string]*SkillDef)
+	agents := make(map[string]*AgentDef)
 
-// ToolNames returns the names of all available tools.
-func (a *AgentDef) ToolNames() []string {
-	names := make([]string, 0, len(a.tools))
-	for n := range a.tools {
-		names = append(names, n)
-	}
-	return names
-}
-
-// SkillInstructions returns all SKILL.md bodies joined for system prompt injection.
-func (a *AgentDef) SkillInstructions() string {
-	if len(a.skillBodies) == 0 {
-		return ""
-	}
-	return strings.Join(a.skillBodies, "\n\n")
-}
-
-// Registry holds all loaded agent definitions.
-type Registry struct {
-	agents map[string]*AgentDef
-	order  []string
-}
-
-// Load scans agentsDir and loads every subfolder as an agent definition.
-// skillReg provides the skill packages agents can declare.
-func Load(agentsDir string, skillReg *skill.Registry) (*Registry, error) {
-	reg := &Registry{agents: make(map[string]*AgentDef)}
-
-	entries, err := os.ReadDir(agentsDir)
+	// 1. LOAD SKILLS FIRST (Agents need them to resolve)
+	sEntries, err := os.ReadDir(skillsDir)
 	if err != nil {
-		return nil, fmt.Errorf("reading agents dir '%s': %w", agentsDir, err)
+		return nil, nil, fmt.Errorf("could not read skills dir: %w", err)
 	}
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, e := range sEntries {
+		if !e.IsDir() {
 			continue
 		}
 
-		agentPath := filepath.Join(agentsDir, entry.Name())
-		def, err := loadAgent(agentPath, entry.Name(), skillReg)
-		if err != nil {
-			fmt.Printf("[registry] warning: skipping '%s': %v\n", entry.Name(), err)
-			continue
+		skillPath := filepath.Join(skillsDir, e.Name())
+		skill := &SkillDef{
+			Name:  e.Name(),
+			Tools: make(map[string]ToolDef),
 		}
 
-		reg.agents[def.Name] = def
-		reg.order = append(reg.order, def.Name)
-
-		skillInfo := "no skills"
-		if len(def.SkillNames) > 0 {
-			skillInfo = "skills: " + strings.Join(def.SkillNames, ", ")
+		// Read SKILL.md
+		if data, err := os.ReadFile(filepath.Join(skillPath, "SKILL.md")); err == nil {
+			skill.Instructions = string(data)
 		}
-		fmt.Printf("[registry] loaded '%s' (%s, %d tools)\n",
-			def.Name, skillInfo, len(def.tools))
-	}
 
-	return reg, nil
-}
-
-func (r *Registry) Get(name string) (*AgentDef, bool) {
-	def, ok := r.agents[name]
-	return def, ok
-}
-
-func (r *Registry) First() *AgentDef {
-	if len(r.order) == 0 {
-		return nil
-	}
-	return r.agents[r.order[0]]
-}
-
-func (r *Registry) Names() []string { return r.order }
-
-func (r *Registry) Menu() string {
-	var sb strings.Builder
-	for _, name := range r.order {
-		def := r.agents[name]
-		desc := def.Description
-		if len(desc) > 120 {
-			desc = desc[:120] + "..."
-		}
-		sb.WriteString(fmt.Sprintf("  - %s: %s\n", name, desc))
-	}
-	return sb.String()
-}
-
-// ── agent loader ──────────────────────────────────────────────────────────────
-
-func loadAgent(agentPath, folderName string, skillReg *skill.Registry) (*AgentDef, error) {
-	agentFile := filepath.Join(agentPath, "AGENT.md")
-	data, err := os.ReadFile(agentFile)
-	if err != nil {
-		return nil, fmt.Errorf("AGENT.md not found")
-	}
-
-	name, description, role, skillNames, body, err := parseAgentMD(string(data))
-	if err != nil {
-		return nil, fmt.Errorf("parse AGENT.md: %w", err)
-	}
-	if name == "" {
-		name = folderName
-	}
-
-	// Wire up tools and instructions from declared skills
-	toolMap := make(map[string]tool.Tool)
-	var schemas []tool.Schema
-	var skillBodies []string
-
-	for _, skillName := range skillNames {
-		s, ok := skillReg.Get(skillName)
-		if !ok {
-			fmt.Printf("[registry] warning: agent '%s' declared unknown skill '%s'\n", name, skillName)
-			continue
-		}
-		// Merge tools from this skill
-		for _, schema := range s.Schemas() {
-			schemas = append(schemas, schema)
-		}
-		// Register tool dispatch — route by tool name through the skill
-		skillCopy := s // capture for closure
-		for _, toolName := range s.ToolNames() {
-			tn := toolName
-			sk := skillCopy
-			toolMap[tn] = &skillToolAdapter{skillName: sk.Name, toolName: tn, skill: sk}
-		}
-		// Collect SKILL.md instructions for system prompt
-		if s.Body != "" {
-			skillBodies = append(skillBodies, fmt.Sprintf("=== %s skill ===\n%s", skillName, s.Body))
-		}
-	}
-
-	return &AgentDef{
-		Name:        name,
-		Description: description,
-		Role:        role,
-		Body:        body,
-		SkillNames:  skillNames,
-		tools:       toolMap,
-		schemas:     schemas,
-		skillBodies: skillBodies,
-	}, nil
-}
-
-// skillToolAdapter bridges AgentDef.Dispatch to the correct Skill.
-type skillToolAdapter struct {
-	skillName string
-	toolName  string
-	skill     *skill.Skill
-}
-
-func (a *skillToolAdapter) Schema() tool.Schema {
-	for _, s := range a.skill.Schemas() {
-		if s.Function.Name == a.toolName {
-			return s
-		}
-	}
-	return tool.Schema{}
-}
-
-func (a *skillToolAdapter) Run(args map[string]any) (string, error) {
-	return a.skill.Dispatch(a.toolName, args)
-}
-
-// ── AGENT.md parser ───────────────────────────────────────────────────────────
-
-func parseAgentMD(content string) (name, description, role string, skills []string, body string, err error) {
-	re := regexp.MustCompile(`(?s)^---\n(.*?)\n---\n?(.*)`)
-	matches := re.FindStringSubmatch(content)
-	if matches == nil {
-		return "", "", "", nil, "", fmt.Errorf("missing frontmatter")
-	}
-	fm := matches[1]
-	body = strings.TrimSpace(matches[2])
-
-	name = fmField(fm, "name")
-	description = fmField(fm, "description")
-	role = fmField(fm, "role")
-
-	// Parse skills: comma-separated string
-	skillsRaw := fmField(fm, "skills")
-	if skillsRaw != "" {
-		for _, s := range strings.Split(skillsRaw, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				skills = append(skills, s)
+		// Scan scripts subfolder for .json schemas
+		scriptsDir := filepath.Join(skillPath, "scripts")
+		if files, err := os.ReadDir(scriptsDir); err == nil {
+			for _, f := range files {
+				if filepath.Ext(f.Name()) == ".json" {
+					toolName := strings.TrimSuffix(f.Name(), ".json")
+					skill.Tools[toolName] = ToolDef{
+						Name:       toolName,
+						SchemaPath: filepath.Join(scriptsDir, f.Name()),
+						ScriptPath: findExec(scriptsDir, toolName),
+					}
+				}
 			}
 		}
+		skills[e.Name()] = skill
 	}
-	return
+
+	// 2. LOAD AGENTS
+	aEntries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not read agents dir: %w", err)
+	}
+
+	for _, e := range aEntries {
+		if !e.IsDir() {
+			continue
+		}
+
+		agent := &AgentDef{Name: e.Name()}
+		filePath := filepath.Join(agentsDir, e.Name(), "AGENT.md")
+
+		file, err := os.Open(filePath)
+		if err != nil {
+			fmt.Printf("[Registry] Warning: Could not open %s\n", filePath)
+			continue
+		}
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+
+			// Normalize line for header checking
+			lowerLine := strings.ToLower(line)
+
+			switch {
+			case strings.HasPrefix(lowerLine, "# role:"):
+				agent.Role = strings.TrimSpace(line[7:])
+
+			case strings.HasPrefix(lowerLine, "# skills:"):
+				// Remove brackets [] and colon, then split by comma
+				val := strings.Trim(line[9:], " :[]")
+				parts := strings.Split(val, ",")
+				for _, p := range parts {
+					sName := strings.TrimSpace(p)
+					if sName == "" {
+						continue
+					}
+					agent.SkillNames = append(agent.SkillNames, sName)
+					if sk, ok := skills[sName]; ok {
+						agent.ResolvedSkills = append(agent.ResolvedSkills, sk)
+					}
+				}
+
+			case strings.HasPrefix(lowerLine, "# allowedsubagents:"):
+				val := strings.Trim(line[19:], " :[]")
+				parts := strings.Split(val, ",")
+				for _, p := range parts {
+					if sub := strings.TrimSpace(p); sub != "" {
+						agent.AllowedSubAgents = append(agent.AllowedSubAgents, sub)
+					}
+				}
+
+			default:
+				// Everything else is treated as Instructions
+				agent.Instructions += line + "\n"
+			}
+		}
+		file.Close()
+		agents[e.Name()] = agent
+	}
+
+	return agents, skills, nil
 }
 
-func fmField(fm, key string) string {
-	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `:\s*(.+?)(?:\n\w|\z)`)
-	m := re.FindStringSubmatch(fm)
-	if m == nil {
-		return ""
+func findExec(dir, name string) string {
+	for _, ext := range []string{".py", ".sh", ".js", ""} {
+		path := filepath.Join(dir, name+ext)
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
 	}
-	val := strings.TrimSpace(m[1])
-	val = strings.Trim(val, `"`)
-	val = regexp.MustCompile(`\n\s+`).ReplaceAllString(val, " ")
-	return val
+	return ""
 }
